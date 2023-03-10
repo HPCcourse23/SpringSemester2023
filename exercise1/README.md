@@ -24,15 +24,15 @@ int main () {
 ## Exercise 2 [Memory Usage]
 Let be N - the number of nodes, then
 
-<img src="https://latex.codecogs.com/svg.latex?\Large&space;4036^3 = \frac{N * 64Gb}{56b} =>" title="\Large 4036^3 = \frac{N * 64Gb}{56b} =>" />
+4036^3 = N * 64Gb/56b =>
 
-<img src="https://latex.codecogs.com/svg.latex?\Large&space;1 Gb = 2^{30} b  =>" title="\Large 1 Gb = 2^{30} b  =>" />
+1 Gb = 2^30b  =>
 
-<img src="https://latex.codecogs.com/svg.latex?\Large&space;2^{36} = \frac{N * 2^{30} * 2^6}{56} =>" title="\Large 2^{36} = \frac{N * 2^{30} * 2^6}{56} =>" />
+2^36 = N * 2^30 * 2^6 / 56 =>
 
-<img src="https://latex.codecogs.com/svg.latex?\Large&space;N = \frac{2^{36} * 56}{2^{36}} =>" title="\Large N = \frac{2^{36} * 56}{2^{36}} =>" />
+N = 2^36 * 56 / 2^36 =>
 
-<img src="https://latex.codecogs.com/svg.latex?\Large&space;N = 56" title="\Large N = 56" />
+N = 56
 
 Answer: 56 nodes
 
