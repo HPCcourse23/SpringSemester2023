@@ -66,7 +66,7 @@ void assign_mass(Array<float, 2> &r, int N, int nGrid, Array<float, 3> &grid, in
     // Loop over all cells for this assignment
     float cell_half = 0.5;
     std::cout << "Assigning mass to the grid using order " << order << std::endl;
-//#pragma omp parallel for
+#pragma omp parallel for
     for (int pn = 0; pn < N; ++pn)
     {
         float x = r(pn, 0);
@@ -92,7 +92,7 @@ void assign_mass(Array<float, 2> &r, int N, int nGrid, Array<float, 3> &grid, in
                     float W_res = Wx[i - i_start] * Wy[j - j_start] * Wz[k - k_start];
 
 // Deposit the mass onto grid(i,j,k)
-//#pragma omp atomic
+#pragma omp atomic
                     grid(wrap_edge(i, nGrid), wrap_edge(j, nGrid), wrap_edge(k, nGrid)) += W_res;
                 }
             }
