@@ -4,7 +4,10 @@
 ### 1. We will not put any MPI calls inside a parallel region, so which level of thread support is required (single, funneled, serialized or multiple)?
 
 ```
-I ma not going to make any MPI calls inside a parallel region, then it is safe to assume that no MPI calls will be made concurrently by multiple threads. Therefore, the level of thread support required in this case could be "funneled" or higher.
+I ma not going to make any MPI calls inside a parallel region, then it is safe 
+to assume that no MPI calls will be made concurrently by multiple threads. 
+Therefore, the level of thread support required in this case could be 
+"funneled" or higher.
 ```
 
 ### 2. Are the two processes automatically dividing up the work?
