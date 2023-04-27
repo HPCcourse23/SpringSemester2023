@@ -1,0 +1,308 @@
+// This uses features from C++17, so you may have to turn this on to compile
+// g++ -std=c++17 -O3 -o assign assign.cxx tipsy.cxx
+#include <iostream>
+#include <cstdint>
+#include <stdlib.h>
+#include <chrono>
+#include "blitz/array.h"
+#include "tipsy.h"
+#include <math.h>
+#include <new>
+#include "weights.h"
+#include <vector>
+#include <complex>
+#include <fftw3.h>
+#include <mpi.h>
+
+int wrap_edge(int coordinate, int N)
+{
+    if (coordinate < 0)
+    {
+        coordinate += N;
+    }
+    else if (coordinate >= N)
+    {
+        coordinate -= N;
+    }
+    return coordinate;
+}
+
+int precalculate_W(float W[], int order, float r, float cell_half = 0.5)
+{
+    switch (order)
+    {
+    case 1:
+        return ngp_weights(r, W);
+    case 2:
+        return cic_weights(r, W);
+    case 3:
+        return tsc_weights(r, W);
+    case 4:
+        return pcs_weights(r, W);
+    default:
+        throw std::invalid_argument("[precalculate_W] Order out of bound");
+    }
+}
+
+int k_indx(int i, int nGrid)
+{
+    int res = i;
+    if (i > nGrid / 2)
+    {
+        res = i - nGrid;
+    }
+    return res;
+}
+
+int get_i_bin(double k, int n_bins, int nGrid, int task = 1)
+{
+    double k_max = sqrt((nGrid / 2.0) * (nGrid / 2.0) * 3.0);
+    switch (task)
+    {
+    case 1:
+        return int(k);
+    case 2:
+        return int(k / k_max * n_bins);
+    case 3:
+        if (k != 0)
+        {
+            return int(log10(k) / log10(k_max) * n_bins);
+        }
+        else
+        {
+            return 0;
+        }
+    default:
+        std::cout << "[get_i_bin] Selected invalid task number. Deafult to 1" << std::endl;
+        return int(k);
+    }
+}
+
+void save_binning(const int binning, std::vector<float> &fPower, std::vector<int> &nPower)
+{
+    const char *binning_filename;
+    switch (binning)
+    {
+    case 1:
+        binning_filename = "linear_binning.csv";
+        break;
+    case 2:
+        binning_filename = "variable_binning.csv";
+        break;
+    case 3:
+        binning_filename = "log_binning.csv";
+        break;
+    }
+
+    std::ofstream f1(binning_filename);
+    f1.precision(6);
+    f1 << "P_k,k" << std::endl;
+    for (int i = 0; i < fPower.size(); ++i)
+    {
+        f1 << (nPower[i] != 0 ? (fPower[i] / nPower[i]) : 0) << "," << i + 1 << std::endl;
+    }
+    f1.close();
+}
+
+void assign_mass(blitz::Array<float, 2> &r, int part_i_start, int part_i_end, int nGrid, blitz::Array<float, 3> &grid, int order = 4)
+{
+    // Loop over all cells for this assignment
+    float cell_half = 0.5;
+    std::cout << "Assigning mass to the grid using order " << order << std::endl;
+#pragma omp parallel for
+    for (int pn = part_i_start; pn < part_i_end; ++pn)
+    {
+        float x = r(pn, 0);
+        float y = r(pn, 1);
+        float z = r(pn, 2);
+
+        float rx = (x + 0.5) * nGrid;
+        float ry = (y + 0.5) * nGrid;
+        float rz = (z + 0.5) * nGrid;
+
+        // precalculate Wx, Wy, Wz and return start index
+        float Wx[order], Wy[order], Wz[order];
+        int i_start = precalculate_W(Wx, order, rx);
+        int j_start = precalculate_W(Wy, order, ry);
+        int k_start = precalculate_W(Wz, order, rz);
+
+        for (int i = i_start; i < i_start + order; i++)
+        {
+            for (int j = j_start; j < j_start + order; j++)
+            {
+                for (int k = k_start; k < k_start + order; k++)
+                {
+                    float W_res = Wx[i - i_start] * Wy[j - j_start] * Wz[k - k_start];
+
+// Deposit the mass onto grid(i,j,k)
+#pragma omp atomic
+                    grid(wrap_edge(i, nGrid), wrap_edge(j, nGrid), wrap_edge(k, nGrid)) += W_res;
+                }
+            }
+        }
+    }
+}
+
+void project_grid(blitz::Array<float, 3> &grid, int nGrid, const char *out_filename)
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+    blitz::Array<float, 2> projected(nGrid, nGrid);
+    for (int i = 0; i < nGrid; ++i)
+    {
+        for (int j = 0; j < nGrid; ++j)
+        {
+            projected(i, j) = max(grid(i, j, blitz::Range::all()));
+        }
+    }
+    std::chrono::duration<double> diff = std::chrono::high_resolution_clock::now() - start_time;
+    std::cout << "Projection took " << std::setw(9) << diff.count() << " s\n";
+
+    std::ofstream f(out_filename);
+    for (int i = 0; i < nGrid; ++i)
+    {
+        for (int j = 0; j < nGrid; ++j)
+        {
+            if (j != nGrid - 1)
+            {
+                f << projected(i, j) << ",";
+            }
+            else
+            {
+                f << projected(i, j);
+            }
+        }
+        f << std::endl;
+    }
+    f.close();
+}
+
+int main(int argc, char *argv[])
+{
+    int provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+
+    int i_rank, N_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &i_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &N_rank);
+
+    if (argc <= 1)
+    {
+        std::cerr << "Usage: " << argv[0] << " tipsyfile.std grid-size [order, projection-filename]"
+                  << std::endl;
+        return 1;
+    }
+
+    int nGrid = 100;
+    if (argc > 2)
+    {
+        nGrid = atoi(argv[2]);
+    }
+
+    int order = 4;
+    if (argc > 3)
+    {
+        order = atoi(argv[3]);
+    }
+
+    const char *out_filename = (argc > 4) ? argv[4] : "projected.csv";
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    TipsyIO io;
+    io.open(argv[1]);
+    if (io.fail())
+    {
+        std::cerr << "Unable to open tipsy file " << argv[1] << std::endl;
+        return errno;
+    }
+    int N = io.count();
+
+    // Load particle positions
+    int N_per = (N + N_rank - 1) / N_rank;
+    int i_start = N_per * i_rank;
+    int i_end = std::min(N_per * (i_rank + 1), N);
+
+    std::cerr << "Loading " << N << " particles" << std::endl;
+    blitz::Array<float, 2> r(blitz::Range(i_start, i_end - 1), blitz::Range(0, 2));
+    io.load(r);
+    std::chrono::duration<double> diff_load = std::chrono::high_resolution_clock::now() - start_time;
+    std::cout << "Reading file took " << std::setw(9) << diff_load.count() << " s\n";
+
+    float *data = new (std::align_val_t(64)) float[nGrid * nGrid * (nGrid + 2)];
+    blitz::Array<float, 3> grid_data(data, blitz::shape(nGrid, nGrid, nGrid), blitz::deleteDataWhenDone);
+    grid_data = 0.0;
+    blitz::Array<float, 3> grid = grid_data(blitz::Range::all(), blitz::Range::all(), blitz::Range(0, nGrid - 1));
+    std::complex<float> *complex_data = reinterpret_cast<std::complex<float> *>(data);
+    blitz::Array<std::complex<float>, 3> kdata(complex_data, blitz::shape(nGrid, nGrid, nGrid / 2 + 1));
+
+    start_time = std::chrono::high_resolution_clock::now();
+    assign_mass(r, i_start, i_end, nGrid, grid, order);
+    std::chrono::duration<double> diff_assignment = std::chrono::high_resolution_clock::now() - start_time;
+    std::cout << "Mass assignment took " << std::setw(9) << diff_assignment.count() << " s\n";
+
+    if (i_rank == 0)
+    {
+        MPI_Reduce(MPI_IN_PLACE, grid.data(), grid.size(), MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    }
+    else
+    {
+        MPI_Reduce(grid.data(), nullptr, grid.size(), MPI_FLOAT, MPI_SUM, 0, MPI_COMM_WORLD);
+    }
+
+    if (i_rank == 0)
+    {
+        // Simple test
+        std::cout << "Sum of all grid mass = " << blitz::sum(grid) << std::endl;
+
+        project_grid(grid, nGrid, out_filename);
+
+        // Convert to overdensity
+        float grid_sum = sum(grid);
+        float mean_density = grid_sum / (nGrid * nGrid * nGrid);
+        grid = (grid - mean_density) / mean_density;
+
+        fftwf_plan plan = fftwf_plan_dft_r2c_3d(nGrid, nGrid, nGrid, data, (fftwf_complex *)complex_data, FFTW_ESTIMATE);
+        std::cout << "Plan created" << std::endl;
+        fftwf_execute(plan);
+        std::cout << "Plan executed" << std::endl;
+        fftwf_destroy_plan(plan);
+        std::cout << "Plan destroyed" << std::endl;
+        // Linear binning is 1
+        // Variable binning is 2
+        // Log binning is 3
+        const int binning = 2;
+
+        int n_bins = 80;
+        if (binning == 1)
+        {
+            n_bins = nGrid;
+        }
+        std::vector<float> fPower(n_bins, 0.0);
+        std::vector<int> nPower(n_bins, 0);
+        float k_max = sqrt((nGrid / 2.0) * (nGrid / 2.0) * 3.0);
+
+        // loop over δ(k) and compute k from kx, ky and kz
+        for (int i = 0; i < nGrid; i++)
+        {
+            int kx = k_indx(i, nGrid);
+            for (int j = 0; j < nGrid; j++)
+            {
+                int ky = k_indx(j, nGrid);
+                for (int l = 0; l < nGrid / 2 + 1; l++)
+                {
+                    int kz = l;
+
+                    float k = sqrt(kx * kx + ky * ky + kz * kz);
+                    int i_bin = get_i_bin(k, n_bins, nGrid, binning);
+                    if (i_bin == fPower.size())
+                        i_bin--;
+                    fPower[i_bin] += std::norm(kdata(i, j, l));
+                    nPower[i_bin] += 1;
+                }
+            }
+        }
+
+        save_binning(binning, fPower, nPower);
+    }
+    MPI_Finalize();
+}
