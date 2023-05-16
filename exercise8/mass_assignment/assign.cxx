@@ -274,24 +274,30 @@ int main(int argc, char *argv[])
     std::cout << "Reading file took " << std::setw(9) << diff_load.count() << " s\n";
 
     particle *prows = reinterpret_cast<particle *>(r.data());
-    std::sort(prows, prows + r.rows(), compare_particles);
+    std::sort(prows, prows + r.rows(), [order, nGrid](const particle &a, const particle &b)
+              { 
+                float a_start = ((a.x + 0.5) * nGrid - (order - 1) * 0.5);
+                float b_start = ((b.x + 0.5) * nGrid - (order - 1) * 0.5);
+                a_start = a_start < 0 ? a_start + nGrid : a_start;
+                b_start = b_start < 0 ? b_start + nGrid : b_start;
+                return (a_start < b_start); });
 
     std::vector<int> send_counts(N_rank, 0);
     int rank_to_send = 0;
-    int send_to_last_count = 0;
     for (int pn = i_start; pn < i_end; ++pn)
     {
         float x = r(pn, 0);
         int i_start = floorf((x + 0.5) * nGrid - (order - 1) * 0.5);
-
+        int rank_to_send = 0;
         if (i_start < 0)
         {
-            send_to_last_count++;
+            rank_to_send = N_rank - 1;
         }
         else
         {
-            send_counts[slab2rank(i_start)]++;
+            rank_to_send = slab2rank(i_start);
         }
+        send_counts[rank_to_send]++;
     }
 
     for (int i = 0; i < N_rank; i++)
@@ -300,7 +306,7 @@ int main(int argc, char *argv[])
     }
 
     std::vector<int> send_displs(N_rank);
-    send_displs[0] = send_to_last_count * 3;
+    send_displs[0] = 0;
     for (int i = 1; i < N_rank; ++i)
     {
         send_displs[i] = send_displs[i - 1] + send_counts[i - 1];
@@ -322,36 +328,13 @@ int main(int argc, char *argv[])
     }
     int part_count = total_recv / 3;
 
-    // =========================== Send ghost region to last rank
-    int send_to_last_count_all[N_rank];
-    int last_count_displ[N_rank];
-    last_count_displ[0] = total_recv;
-    MPI_Allgather(&send_to_last_count, 1, MPI_INT, &send_to_last_count_all[0], 1, MPI_INT, MPI_COMM_WORLD);
-    int send_to_last_count_total = 0;
-    for (int i = 0; i < N_rank; i++)
-    {
-        send_to_last_count_total += send_to_last_count_all[i];
-        send_to_last_count_all[i] *= 3;
-        if (i >= 1)
-            last_count_displ[i] = last_count_displ[i - 1] + send_to_last_count_all[i - 1];
-    }
-
-    if (i_rank == N_rank - 1)
-    {
-        part_count += send_to_last_count_total;
-    }
-    // =========================== End of send ghost region to last rank
-
     printf("[Rank %d] Total recv = %d\n", i_rank, part_count);
     blitz::Array<float, 2> r_local(part_count, 3);
     MPI_Alltoallv(r.dataFirst(), &send_counts[0], &send_displs[0], MPI_FLOAT,
                   r_local.data(), &recv_counts[0], &recv_displs[0], MPI_FLOAT,
                   MPI_COMM_WORLD);
-    // Send ghost region to last rank
-    MPI_Gatherv(r.data(), send_to_last_count * 3, MPI_FLOAT,
-                r_local.data(), send_to_last_count_all, last_count_displ, MPI_FLOAT, N_rank - 1,
-                MPI_COMM_WORLD);
 
+    printf("[Rank %d] first particle = %f, last particle = %f\n", i_rank, r_local(0, 0), r_local(part_count - 1, 0));
     int grid_start = start0;
     int grid_end = std::min(int(start0 + local0 - 1), int(nGrid)) + order;
 
@@ -365,7 +348,6 @@ int main(int argc, char *argv[])
 
     std::complex<float> *complex_data = reinterpret_cast<std::complex<float> *>(data);
     blitz::Array<std::complex<float>, 3> kdata(complex_data, blitz::shape(grid_end - grid_start, nGrid, nGrid / 2 + 1));
-    std::cout << kdata.base() << std::endl;
     start_time = std::chrono::high_resolution_clock::now();
     assign_mass(r_local, 0, part_count, nGrid, grid, order, grid_start, grid_end);
     printf("[Rank %d] Grid sum after mass assignment = %f\n", i_rank, sum(grid));
@@ -377,7 +359,7 @@ int main(int argc, char *argv[])
     MPI_Comm newcomm1, newcomm2;
     int color = i_rank / 2;
     int key = (i_rank + 1) % 2;
-    int send_rank, recv_rank;
+    printf("[FIRST Rank %d] color = %d, key = %d\n", i_rank, color, key);
     MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm1);
     // Send and receive data in a ring fashion
     if (key == 0)
@@ -401,6 +383,7 @@ int main(int argc, char *argv[])
         key = i_rank % 2;
     }
 
+    printf("[SECOND Rank %d] color = %d, key = %d\n", i_rank, color, key);
     MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm2);
     if (key == 0)
     {
