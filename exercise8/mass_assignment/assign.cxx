@@ -47,7 +47,7 @@ int precalculate_W(float W[], int order, float r, float cell_half = 0.5)
     case 4:
         return pcs_weights(r, W);
     default:
-        throw std::invalid_argument("[precalculate_W] Order out of bound");
+        throw std::invalid_argument("[precalculate_W] order out of bound");
     }
 }
 
@@ -354,82 +354,131 @@ int main(int argc, char *argv[])
     std::chrono::duration<double> diff_assignment = std::chrono::high_resolution_clock::now() - start_time;
     printf("[Rank %d] Mass assignment took %fs\n", i_rank, diff_assignment.count());
 
-    MPI_Request req[3];
-    // First split the MPI_COMM_WORLD communicator into (0,1), (2,3), (4,5)
-    MPI_Comm newcomm1, newcomm2;
-    int color = i_rank / 2;
-    int key = (i_rank + 1) % 2;
-    printf("[FIRST Rank %d] color = %d, key = %d\n", i_rank, color, key);
-    MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm1);
-    // Send and receive data in a ring fashion
-    if (key == 0)
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    float actual_mass = sum(grid);
+    MPI_Allreduce(MPI_IN_PLACE, &actual_mass, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    if (i_rank == 0)
     {
-        MPI_Ireduce(MPI_IN_PLACE, grid.data(), ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm1, &req[0]);
-    }
-    else
-    {
-        MPI_Ireduce(ghost_region.data(), nullptr, ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm1, &req[0]);
+        printf("Total mass: %f\n", actual_mass);
     }
 
-    // Second split the communicator into (1,2), (3,4), (5,0)
-    if (i_rank == N_rank - 1)
+    if (order != 1)
     {
-        color = 0;
-        key = 1;
-    }
-    else
-    {
-        color = (i_rank + 1) / 2;
-        key = i_rank % 2;
-    }
-
-    printf("[SECOND Rank %d] color = %d, key = %d\n", i_rank, color, key);
-    MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm2);
-    if (key == 0)
-    {
-        MPI_Ireduce(MPI_IN_PLACE, grid.data(), ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm2, &req[1]);
-    }
-    else
-    {
-        MPI_Ireduce(ghost_region.data(), nullptr, ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm2, &req[1]);
-    }
-
-    if (N_rank % 2 == 1)
-    {
-        color = 0;
-        // Odd number of proc
-        MPI_Comm newcomm3;
-        if (i_rank == N_rank - 2)
+        if (N_rank == 1)
         {
-            key = 1;
-        }
-        else if (i_rank == N_rank - 1)
-        {
-            key = 0;
+            grid(blitz::Range(grid_start, grid_start + order - 2), blitz::Range::all(), blitz::Range::all()) += ghost_region;
         }
         else
         {
-            key = 1;
-            color = MPI_UNDEFINED;
-        }
+            MPI_Request requests[3];
+            MPI_Status statuses[3];
+            requests[0] = MPI_REQUEST_NULL;
+            requests[1] = MPI_REQUEST_NULL;
+            requests[2] = MPI_REQUEST_NULL;
+            MPI_Comm newcomm1, newcomm2;
+            int color = i_rank / 2;
+            int key = (i_rank + 1) % 2;
 
-        if (key == 0)
-        {
-            MPI_Ireduce(MPI_IN_PLACE, grid.data(), ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm3, &req[2]);
+            // Last rank in odd amount of ranks will be alone in communicator so just ignore it
+            if (!((N_rank % 2 == 1) && (i_rank == N_rank - 1)))
+            {
+                MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm1);
+            }
+            else
+            {
+                MPI_Comm_split(MPI_COMM_WORLD, MPI_UNDEFINED, i_rank, &newcomm1); // Create an "empty" communicator for ranks not included in the reduction
+            }
+
+            if (!((N_rank % 2 == 1) && (i_rank == N_rank - 1)))
+            {
+                if (key == 0)
+                {
+                    MPI_Ireduce(MPI_IN_PLACE, grid.data(), (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm1, &requests[0]);
+                }
+                else
+                {
+                    MPI_Ireduce(ghost_region.data(), nullptr, (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm1, &requests[0]);
+                }
+            }
+            // Second split the communicator into (1,2), (3,4), (5,0)
+            if (i_rank == N_rank - 1)
+            {
+                color = 0;
+                key = 1;
+            }
+            else
+            {
+                color = (i_rank + 1) / 2;
+                key = i_rank % 2;
+            }
+            // Next to last rank in odd amount of ranks will be alone in communicator so just ignore it
+            if (!((N_rank % 2 == 1) && (i_rank == N_rank - 2)))
+            {
+                MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm2);
+            }
+            else
+            {
+                MPI_Comm_split(MPI_COMM_WORLD, MPI_UNDEFINED, i_rank, &newcomm2);
+            }
+            if (!((N_rank % 2 == 1) && (i_rank == N_rank - 2)))
+            {
+                if (key == 0)
+                {
+                    MPI_Ireduce(MPI_IN_PLACE, grid.data(), (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm2, &requests[1]);
+                }
+                else
+                {
+                    MPI_Ireduce(ghost_region.data(), nullptr, (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm2, &requests[1]);
+                }
+            }
+
+            if (N_rank % 2 == 1)
+            {
+                MPI_Comm newcomm3;
+                if (i_rank >= N_rank - 2)
+                {
+                    color = 0;
+
+                    // Odd number of proc
+                    if (i_rank == N_rank - 2)
+                    {
+                        key = 1;
+                    }
+                    else if (i_rank == N_rank - 1)
+                    {
+                        key = 0;
+                    }
+                    MPI_Comm_split(MPI_COMM_WORLD, color, key, &newcomm3);
+                }
+                else
+                {
+
+                    MPI_Comm_split(MPI_COMM_WORLD, MPI_UNDEFINED, i_rank, &newcomm3);
+                }
+                if (i_rank >= N_rank - 2)
+                {
+                    if (key == 0)
+                    {
+                        MPI_Ireduce(MPI_IN_PLACE, grid.data(), (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm3, &requests[2]);
+                    }
+                    else
+                    {
+                        MPI_Ireduce(ghost_region.data(), nullptr, (nGrid + 2) * nGrid * (order - 1), MPI_FLOAT, MPI_SUM, 0, newcomm3, &requests[2]);
+                    }
+                }
+            }
+            MPI_Waitall(3, requests, MPI_STATUS_IGNORE);
         }
-        else
-        {
-            MPI_Ireduce(ghost_region.data(), nullptr, ghost_region.size(), MPI_FLOAT, MPI_SUM, 0, newcomm3, &req[2]);
-        }
-        MPI_Waitall(3, &req[0], MPI_STATUSES_IGNORE);
     }
-    else
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    actual_mass = sum(grid(blitz::Range(grid_start, grid_end - order), blitz::Range::all(), blitz::Range::all()));
+    MPI_Allreduce(MPI_IN_PLACE, &actual_mass, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    if (i_rank == 0)
     {
-        MPI_Waitall(2, req, MPI_STATUSES_IGNORE);
+        printf("After all reduction grid sum = %f\n", actual_mass);
     }
-
-    printf("[Rank %d] After all reduction grid sum = %f\n", i_rank, sum(grid(blitz::Range(start0, grid_end - order), blitz::Range::all(), blitz::Range::all())));
-
     // Overdensity
     grid = grid - 1;
 
