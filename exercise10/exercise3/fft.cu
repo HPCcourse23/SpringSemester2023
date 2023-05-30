@@ -3,6 +3,7 @@
 #include <complex>
 #include <cmath>
 #include <iostream>
+#include <cuda.h>
 using namespace blitz;
 using std::complex;
 
@@ -36,27 +37,26 @@ int main()
 {
     int n = 10000;
 
-    // Out of place
-    Array<float, 2> rdata1(n, n);
-    Array<std::complex<float>, 2> kdata1(n, n / 2 + 1);
-    fftwf_plan plan1 = fftwf_plan_dft_r2c_2d(n, n,
-                                             rdata1.data(), reinterpret_cast<fftwf_complex *>(kdata1.data()), FFTW_ESTIMATE);
-    fill_array(rdata1);
-    fftwf_execute(plan1);
-    fftwf_destroy_plan(plan1);
-    std::cout << ">>> Out of place FFT " << (validate(rdata1, kdata1) ? "match" : "MISMATCH") << endl;
+   Array<float, 2> raw_data3(n, n + 2);
+    Array<float, 2> rdata3 = raw_data3(Range(0, n - 1), Range(0, n - 1));
+    fill_array(rdata3);
+    // Calculate the size in bytes
+    size_t sizeInBytes = n * (n + 2) * sizeof(float);
+    // Allocate memory on the GPU
+    void *deviceData;
+    cudaMalloc(&deviceData, sizeInBytes);
+    // Copy data from CPU to GPU
+    cudaMemcpy(deviceData, rdata3.data(), sizeInBytes, cudaMemcpyHostToDevice);
 
-    // in-place
-    Array<float, 2> raw_data2(n, n + 2);
-    Array<float, 2> rdata2 = raw_data2(Range(0, n - 1), Range(0, n - 1));
-    fftwf_plan plan2 = fftwf_plan_dft_r2c_2d(n, n,
-                                             rdata2.data(), reinterpret_cast<fftwf_complex *>(rdata2.data()), FFTW_ESTIMATE);
-    fill_array(rdata2);
-    fftwf_execute(plan2);
-    fftwf_destroy_plan(plan2);
-    Array<std::complex<float>, 2> kdata2(reinterpret_cast<std::complex<float> *>(rdata2.data()),
-                                         shape(n, n / 2 + 1), neverDeleteData);
-    std::cout << ">>> In-place FFT " << (validate(rdata1, kdata2) ? "match" : "MISMATCH") << endl;
+    Array<float, 2> raw_data4(n, n + 2);
+    Array<float, 2> rdata4 = raw_data4(Range(0, n - 1), Range(0, n - 1));
+
+    cudaMemcpy(rdata4.data(), deviceData, sizeInBytes, cudaMemcpyDeviceToHost);
+    
+    cudaDeviceSynchronize();
+    std::cout << (all(abs(rdata3 - rdata4)) < 1e-5 ? "match" : "mismatch") << std::endl;
+    // Free GPU memory
+    cudaFree(deviceData);
 
     return 0;
 }
